@@ -1,0 +1,182 @@
+#include "application.h"
+#include "button.h"
+#include "codecs/no_audio_codec.h"
+#include "config.h"
+#include "ht1621_sniffer.h"
+#include "mcp_server.h"
+#include "wifi_board.h"
+
+#ifdef CONFIG_YN038_TFT_DISPLAY
+#include "environment_display.h"
+#include "st7735s_panel.h"
+#include <driver/spi_common.h>
+#endif
+
+#include <esp_http_client.h>
+#include <esp_netif.h>
+#include <esp_log.h>
+
+class Yn038XiaozhiBoard : public WifiBoard {
+private:
+#ifdef CONFIG_YN038_TFT_DISPLAY
+    EnvironmentDisplay* display_ = nullptr;
+
+    void InitializeDisplay() {
+        spi_bus_config_t bus = {};
+        bus.mosi_io_num = GPIO_NUM_11;
+        bus.miso_io_num = GPIO_NUM_NC;
+        bus.sclk_io_num = GPIO_NUM_12;
+        bus.quadwp_io_num = GPIO_NUM_NC;
+        bus.quadhd_io_num = GPIO_NUM_NC;
+        bus.max_transfer_sz = 128 * 160 * sizeof(uint16_t);
+        ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &bus, SPI_DMA_CH_AUTO));
+        esp_lcd_panel_io_spi_config_t io_config = {};
+        io_config.cs_gpio_num = GPIO_NUM_17;
+        io_config.dc_gpio_num = GPIO_NUM_13;
+        io_config.spi_mode = 0;
+        io_config.pclk_hz = 10 * 1000 * 1000;
+        io_config.trans_queue_depth = 10;
+        io_config.lcd_cmd_bits = 8;
+        io_config.lcd_param_bits = 8;
+        esp_lcd_panel_io_handle_t io = nullptr;
+        ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &io));
+        esp_lcd_panel_dev_config_t config = {};
+        config.reset_gpio_num = GPIO_NUM_14;
+        config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR;
+        config.bits_per_pixel = 16;
+        esp_lcd_panel_handle_t panel = nullptr;
+        // The 1.8-inch 128x160 module uses ST7735S, which IDF does not ship.
+        ESP_ERROR_CHECK(esp_lcd_new_panel_st7735s(io, &config, &panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
+        ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, true, true));
+        ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel, false));
+        display_ = new EnvironmentDisplay(io, panel);
+        ESP_LOGI("ENVLCD", "128x160 ST7735S initialized: CLK=12 MOSI=11 RST=14 DC=13 CS=17; external backlight");
+    }
+#endif
+    Button boot_button_;
+    Ht1621Sniffer ht1621_sniffer_;
+
+    void InitializeButton() {
+        boot_button_.OnClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
+            }
+            app.ToggleChatState();
+        });
+    }
+
+    void StartEnvironmentPush() {
+        xTaskCreate(&Yn038XiaozhiBoard::EnvironmentPushTask, "env_push", 6144, this, 2,
+                    nullptr);
+    }
+
+    static void EnvironmentPushTask(void* arg) {
+        auto* board = static_cast<Yn038XiaozhiBoard*>(arg);
+        bool ipv6_started = false;
+        unsigned int attempts = 0;
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(ENVIRONMENT_PUSH_INTERVAL_MS));
+#ifdef CONFIG_YN038_TFT_DISPLAY
+            board->display_->UpdateEnvironment(board->ht1621_sniffer_.GetReadingJson());
+#endif
+            auto* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            esp_netif_ip_info_t info = {};
+            if (!netif || !esp_netif_is_netif_up(netif) ||
+                esp_netif_get_ip_info(netif, &info) != ESP_OK || !info.ip.addr) {
+                ipv6_started = false;
+                continue;
+            }
+            esp_ip6_addr_t addr6 = {};
+            if (!ipv6_started) {
+                ipv6_started = esp_netif_get_ip6_linklocal(netif, &addr6) == ESP_OK ||
+                    esp_netif_create_ip6_linklocal(netif) == ESP_OK;
+            }
+            bool has_ipv6 = esp_netif_get_ip6_global(netif, &addr6) == ESP_OK;
+            board->PushEnvironmentOnce(has_ipv6, attempts++ % 10 == 0);
+        }
+    }
+
+    void PushEnvironmentOnce(bool has_ipv6, bool report) {
+        const std::string body = ht1621_sniffer_.GetReadingJson();
+        const bool available = body.find("\"available\":true") != std::string::npos;
+        if (!available && !report) return;
+        static const char* const kPushUrls[] = {ENVIRONMENT_PUSH_URL_IPV6, ENVIRONMENT_PUSH_URL};
+        for (const char* push_url : kPushUrls) {
+            if (!has_ipv6 && push_url == kPushUrls[0]) continue;
+            esp_http_client_config_t config = {};
+            config.url = push_url;
+            config.method = HTTP_METHOD_POST;
+            config.timeout_ms = 4000;
+            config.disable_auto_redirect = true;
+            esp_http_client_handle_t client = esp_http_client_init(&config);
+            if (client == nullptr) {
+                continue;
+            }
+            esp_http_client_set_header(client, "Content-Type", "application/json");
+            esp_http_client_set_post_field(client, body.c_str(), static_cast<int>(body.size()));
+            const esp_err_t err = esp_http_client_perform(client);
+            const int status = esp_http_client_get_status_code(client);
+            esp_http_client_cleanup(client);
+            if (report) ESP_LOGI("ENVPUSH", "frame=%s via=%s status=%d result=%s",
+                available ? "yes" : "no", push_url == kPushUrls[0] ? "IPv6" : "IPv4",
+                status, esp_err_to_name(err));
+            if (err == ESP_OK && status >= 200 && status < 300) {
+                return;
+            }
+        }
+    }
+
+    void InitializeEnvironmentTool() {
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool(
+            "self.environment.get_reading",
+            "读取本机连接的空气质量检测器。返回温度、湿度、CO2、甲醛(HCHO)、"
+            "TVOC、数据新鲜度和HT1621原始帧。字段为null表示该位尚未完成可靠标定，"
+            "不要猜测null字段。",
+            PropertyList(),
+            [this](const PropertyList&) -> ToolResult {
+                return ht1621_sniffer_.GetReadingJson();
+            });
+    }
+
+public:
+    Yn038XiaozhiBoard()
+        : boot_button_(BOOT_BUTTON_GPIO),
+          ht1621_sniffer_(HT1621_SNIFFER_GPIO_CS,
+                          HT1621_SNIFFER_GPIO_WR,
+                          HT1621_SNIFFER_GPIO_DATA) {
+#ifdef CONFIG_YN038_TFT_DISPLAY
+        InitializeDisplay();
+#endif
+        InitializeButton();
+#if HT1621_SNIFFER_ENABLED
+        ht1621_sniffer_.Start();
+        InitializeEnvironmentTool();
+        StartEnvironmentPush();
+#endif
+    }
+
+#ifdef CONFIG_YN038_TFT_DISPLAY
+    Display* GetDisplay() override { return display_; }
+#endif
+
+    AudioCodec* GetAudioCodec() override {
+        static NoAudioCodecSimplex audio_codec(
+            AUDIO_INPUT_SAMPLE_RATE,
+            AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_SPK_GPIO_BCLK,
+            AUDIO_I2S_SPK_GPIO_LRCK,
+            AUDIO_I2S_SPK_GPIO_DOUT,
+            AUDIO_I2S_MIC_GPIO_SCK,
+            AUDIO_I2S_MIC_GPIO_WS,
+            AUDIO_I2S_MIC_GPIO_DIN);
+        return &audio_codec;
+    }
+};
+
+DECLARE_BOARD(Yn038XiaozhiBoard);
+

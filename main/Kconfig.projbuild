@@ -2,7 +2,7 @@ menu "Xiaozhi Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://api.tenclass.net/xiaozhi/ota/"
+    default "http://10.0.0.185:8003/xiaozhi/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
 
@@ -661,6 +661,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_XORIGIN_AIPI_LITE
         bool "XOrigin AiPi-Lite"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_YN038_XIAOZHI
+        bool "YN038 ESP32-S3 XiaoZhi speaker"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_YUNLIAO_S3
         bool "Yunliao S3 (小智云聊)"
         depends on IDF_TARGET_ESP32S3
@@ -698,6 +701,11 @@ config RESPEAKER_AUDIO_DIAGNOSTICS
     help
         Report I2S sample counts, amplitude and raw sample pairs every five
         seconds while capturing. Leave disabled for normal operation.
+
+config YN038_TFT_DISPLAY
+    bool "YN038 1.8-inch SPI 128x160 environment display"
+    depends on BOARD_TYPE_YN038_XIAOZHI
+    default n
 
 config RESPEAKER_I2S_CLOCK_PROBE_ONLY
     bool "ReSpeaker: passive I2S clock diagnostic only (no chat)"

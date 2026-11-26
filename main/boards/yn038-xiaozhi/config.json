@@ -1,0 +1,19 @@
+{
+    "type": "yn038-xiaozhi",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "yn038-xiaozhi",
+            "sdkconfig_append": [
+                "CONFIG_YN038_TFT_DISPLAY=n"
+            ]
+        },
+        {
+            "name": "yn038-xiaozhi-tft",
+            "sdkconfig_append": [
+                "CONFIG_YN038_TFT_DISPLAY=y",
+                "CONFIG_LWIP_IPV6_AUTOCONFIG=y"
+            ]
+        }
+    ]
+}

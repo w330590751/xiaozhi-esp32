@@ -917,6 +917,13 @@ elseif(CONFIG_BOARD_TYPE_FOLOTOY_AI_PASSPORT)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
     set(BUILTIN_ICON_FONT font_material_symbols_20_4)
     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_32)
+elseif(CONFIG_BOARD_TYPE_YN038_XIAOZHI)
+    set(BOARD_DIR "yn038-xiaozhi")
+    if(CONFIG_YN038_TFT_DISPLAY)
+        set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
+        set(BUILTIN_ICON_FONT font_material_symbols_14_1)
+        set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_32)
+    endif()
 elseif(CONFIG_BOARD_TYPE_YUNLIAO_S3)
     set(BOARD_DIR "yunliao-s3")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
@@ -1001,6 +1008,9 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
 list(APPEND SOURCES ${BOARD_SOURCES})
+if(CONFIG_YN038_TFT_DISPLAY)
+    list(APPEND SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/boards/yn038-xiaozhi/st7735s_panel.c")
+endif()
 
 # Select one audio engine for each chip family
 if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4 OR CONFIG_IDF_TARGET_ESP32S31)
@@ -1223,6 +1233,7 @@ idf_component_register(SRCS ${SOURCES}
                         mbedtls
                         console
                         efuse
+                        esp_http_client
                         bt
                         fatfs
                         xiaozhi-fonts
