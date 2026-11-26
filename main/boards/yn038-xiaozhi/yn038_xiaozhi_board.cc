@@ -75,6 +75,7 @@ private:
         });
     }
 
+#ifdef CONFIG_YN038_TFT_DISPLAY
     // The panel shows air data plus the assistant's last turn and the weather.
     // Both come from the PC service over the LAN, so the board keeps working while
     // the device sits idle and is not holding a chat session.
@@ -84,9 +85,21 @@ private:
 
     static void DashboardTask(void* arg) {
         auto* board = static_cast<Yn038XiaozhiBoard*>(arg);
+        bool online = false;
         for (;;) {
+            auto* iface = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (!iface || !esp_netif_is_netif_up(iface)) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            const bool ok = board->RefreshDashboard();
+            if (ok != online) {
+                online = ok;
+                board->display_->SetOnline(online);
+                ESP_LOGI("DASH", "PC dashboard link %s", online ? "up" : "down");
+            }
             board->RefreshAir();
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(DASHBOARD_REFRESH_MS));
         }
     }
 
@@ -154,6 +167,17 @@ private:
 
     void RefreshAir() {
         const std::string body = ht1621_sniffer_.GetReadingJson();
+        esp_http_client_config_t cfg = {};
+        cfg.url = "http://10.0.0.185:8003/internal/environment/push";
+        cfg.method = HTTP_METHOD_POST;
+        cfg.timeout_ms = 3500;
+        cfg.disable_auto_redirect = true;
+        if (auto client = esp_http_client_init(&cfg)) {
+            esp_http_client_set_header(client, "Content-Type", "application/json");
+            esp_http_client_set_post_field(client, body.data(), body.size());
+            esp_http_client_perform(client);
+            esp_http_client_cleanup(client);
+        }
         cJSON* root = cJSON_Parse(body.c_str());
         if (root == nullptr) return;
         auto* available = cJSON_GetObjectItem(root, "available");
@@ -169,6 +193,7 @@ private:
                             static_cast<float>(num("tvoc_mg_m3", -1)));
         cJSON_Delete(root);
     }
+#endif
 
     void StartEnvironmentPush() {
         xTaskCreate(&Yn038XiaozhiBoard::EnvironmentPushTask, "env_push", 6144, this, 2,
